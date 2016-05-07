@@ -1,5 +1,5 @@
 /*
-Sherlock a simple little package designed to help tidy up go code by reducing
+Package sherlock a simple little package designed to help tidy up go code by reducing
 the substantial number of if err != nil checks usually performed.
 */
 package sherlock
@@ -17,8 +17,11 @@ const ()
 var (
 	sherlock struct {
 		notebook string
+		action   func(error)
 	}
 
+	// ErrInspect is returned if Inspect is called and the final argument
+	// is not an error type (or nil).
 	ErrInspect = errors.New("improper use of Inspect function")
 )
 
@@ -32,6 +35,12 @@ type failure struct {
 // this file, Sherlock will revert to creating a temporary file for it.
 func Notebook(path string) {
 	sherlock.notebook = path
+}
+
+// Action sets an action for Sherlock to perform after concluding an
+// investion if something went wrong.
+func Action(fn func(err error)) {
+	sherlock.action = fn
 }
 
 // Assert is used to ensure that things are operating as expected. If the
@@ -64,6 +73,7 @@ func Investigation() {
 			return
 		}
 		writeCaseFiles(fail)
+		sherlock.action(fail.err)
 	}
 }
 
