@@ -15,15 +15,16 @@ import (
 const ()
 
 var (
-	sherlock struct {
-		notebook string
-		action   func(error)
-	}
-
 	// ErrInspect is returned if Inspect is called and the final argument
 	// is not an error type (or nil).
 	ErrInspect = errors.New("improper use of Inspect function")
 )
+
+// Sherlock checks errors for you
+type Sherlock struct {
+	notebook string
+	action   func(error)
+}
 
 type failure struct {
 	err   error
@@ -33,14 +34,14 @@ type failure struct {
 // Notebook can be called to set a file location where Sherlock should leave
 // his notes after an investigation. If an error occurs whilst trying to use
 // this file, Sherlock will revert to creating a temporary file for it.
-func Notebook(path string) {
-	sherlock.notebook = path
+func (s *Sherlock) Notebook(path string) {
+	s.notebook = path
 }
 
 // Action sets an action for Sherlock to perform after concluding an
 // investion if something went wrong.
-func Action(fn func(err error)) {
-	sherlock.action = fn
+func (s *Sherlock) Action(fn func(err error)) {
+	s.action = fn
 }
 
 // Assert is used to ensure that things are operating as expected. If the
@@ -65,25 +66,25 @@ func Inspect(vals ...interface{}) {
 }
 
 // Investigation should be deferred before any
-func Investigation() {
+func (s *Sherlock) Investigation() {
 	r := recover()
 	if r != nil {
 		fail, ok := r.(*failure)
 		if !ok {
-			return
+			panic(r)
 		}
-		writeCaseFiles(fail)
-		sherlock.action(fail.err)
+		s.writeCaseFiles(fail)
+		s.action(fail.err)
 	}
 }
 
-func writeCaseFiles(fail *failure) {
+func (s *Sherlock) writeCaseFiles(fail *failure) {
 	var err error
 	var notebook *os.File
-	if sherlock.notebook != "" {
-		err = os.Remove(sherlock.notebook)
+	if s.notebook != "" {
+		err = os.Remove(s.notebook)
 		if err == nil {
-			notebook, err = os.Create(sherlock.notebook)
+			notebook, err = os.Create(s.notebook)
 		}
 	}
 	if notebook == nil {
