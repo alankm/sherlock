@@ -16,6 +16,7 @@ import (
 type Sherlock struct {
 	notebook   string
 	action     func(bool, error)
+	registered map[error]bool
 	mappings   map[error]error
 	substrings map[string]error
 	standard   error
@@ -30,20 +31,26 @@ func (s *Sherlock) Standard(err error) {
 	s.standard = err
 }
 
-// Register a mapping from one error to another for Sherlock to translate. When
-// Sherlock receives a registered error via Assert or Try, instead of panicking
-// with the received error it will use the mapped error.
-func (s *Sherlock) Register(input, output error) {
+// Register adds the given error to the set of errors that should not be
+// replaced by the default error.
+func (s *Sherlock) Register(err error) {
+	s.registered[err] = true
+}
+
+// Map one error to another for Sherlock to translate. When Sherlock receives a
+// registered error via Assert or Try, instead of panicking with the received
+// error it will use the mapped error.
+func (s *Sherlock) Map(input, output error) {
 	s.mappings[input] = output
 }
 
-// RegisterSubstring a mapping from one substring to an error for Sherlock to
-// translate. When Sherlock receives an error via Assert or Try and cannot find
-// a Registered error mapping, it will then resort to comparing all registered
-// strings against the Error() of the received error. If the received error
-// contains a registered string as a prefix substring then it will use the
+// MapPrefix a mapping from one substring to an error for Sherlock to translate.
+// When Sherlock receives an error via Assert or Try and cannot find a
+// Registered error or mapping, it will then resort to comparing all registered
+// prefix strings against the Error() of the received error. If the received
+// error contains a registered string as a prefix substring then it will use the
 // error registered with this function.
-func (s *Sherlock) RegisterSubstring(input string, output error) {
+func (s *Sherlock) MapPrefix(input string, output error) {
 	s.substrings[input] = output
 }
 
@@ -89,6 +96,11 @@ func Try(vals ...interface{}) {
 }
 
 func (s *Sherlock) error(err error) error {
+	// check if the error is registered
+	_, ok := s.registered[err]
+	if ok {
+		return err
+	}
 	// check if map contains err
 	val, ok := s.mappings[err]
 	if ok {
