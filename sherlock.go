@@ -5,31 +5,51 @@ the substantial number of if err != nil checks usually performed.
 package sherlock
 
 import (
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"runtime/debug"
-)
-
-const ()
-
-var (
-	// ErrInspect is returned if Inspect is called and the final argument
-	// is not an error type (or nil).
-	ErrInspect = errors.New("improper use of Detect function")
+	"strings"
 )
 
 // Sherlock checks errors for you
 type Sherlock struct {
-	notebook string
-	action   func(bool, error)
+	notebook   string
+	action     func(bool, error)
+	mappings   map[error]error
+	substrings map[string]error
+	standard   error
+}
+
+// Standard allows you to define a default-case error for Sherlock to throw as a
+// result of an Assert or a Try when the received error is not a registered
+// error. The default behaviour is to just pass it straight through, but this
+// makes it possible to pass a generic error such as an errInternal to represent
+// an unexpected edge case that needs to be reported as a bug.
+func (s *Sherlock) Standard(err error) {
+	s.standard = err
+}
+
+// Register a mapping from one error to another for Sherlock to translate. When
+// Sherlock receives a registered error via Assert or Try, instead of panicking
+// with the received error it will use the mapped error.
+func (s *Sherlock) Register(input, output error) {
+	s.mappings[input] = output
+}
+
+// RegisterSubstring a mapping from one substring to an error for Sherlock to
+// translate. When Sherlock receives an error via Assert or Try and cannot find
+// a Registered error mapping, it will then resort to comparing all registered
+// strings against the Error() of the received error. If the received error
+// contains a registered string as a prefix substring then it will use the
+// error registered with this function.
+func (s *Sherlock) RegisterSubstring(input string, output error) {
+	s.substrings[input] = output
 }
 
 type failure struct {
-	detect bool
-	err    error
-	stack  []byte
+	err   error
+	stack []byte
 }
 
 // Notebook can be called to set a file location where Sherlock should leave
@@ -50,21 +70,38 @@ func (s *Sherlock) Action(fn func(detected bool, err error)) {
 // as its argument.
 func Assert(statement bool, err error) {
 	if statement == false {
-		panic(&failure{false, err, debug.Stack()})
+		panic(&failure{err, debug.Stack()})
 	}
 }
 
-// Detect should be used with a function that can return an error. The final
-// argument is assumed to be type error or nil. If it is an error, Detect
-// throws a panic with the given error as its argument. It also provides true
-// to the Action, which Assert does not do.
-func Detect(vals ...interface{}) {
+// Try should be used with a function that can return an error. The final
+// argument is assumed to be type error or nil. If it is an error, Try throws a
+// panic with the given error as its argument.
+func Try(vals ...interface{}) {
 	x := vals[len(vals)-1]
 	if x != nil {
 		err, ok := x.(error)
-		Assert(ok, ErrInspect)
-		panic(&failure{true, err, debug.Stack()})
+		if !ok {
+			return
+		}
+		panic(&failure{err, debug.Stack()})
 	}
+}
+
+func (s *Sherlock) error(err error) error {
+	// check if map contains err
+	val, ok := s.mappings[err]
+	if ok {
+		return val
+	}
+	// check if err matches any known substring prefixes
+	e := err.Error()
+	for key, val := range s.substrings {
+		if strings.HasPrefix(e, key) {
+			return val
+		}
+	}
+	return err
 }
 
 // Investigation should be deferred before any
@@ -77,25 +114,24 @@ func (s *Sherlock) Investigation() {
 			panic(r)
 		}
 		s.writeCaseFiles(fail)
-		s.action(fail.detect, fail.err)
 	}
 }
 
 // Catch should be deferred and can be used within a closure to change the
 // return value of an error.
-func Catch(err *error) {
+func (s *Sherlock) Catch(err *error) {
 	r := recover()
 	if r == nil {
 		return
 	}
 	x, ok := r.(error)
 	if ok {
-		*err = x
+		*err = s.error(x)
 		return
 	}
 	y, ok := r.(failure)
 	if ok {
-		*err = y.err
+		*err = s.error(y.err)
 	}
 }
 
