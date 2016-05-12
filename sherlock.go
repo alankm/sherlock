@@ -101,6 +101,11 @@ func (s *Sherlock) error(err error) error {
 			return val
 		}
 	}
+	// return default error if there is one
+	if s.standard != nil {
+		return s.standard
+	}
+	// return received error
 	return err
 }
 
