@@ -17,18 +17,19 @@ const ()
 var (
 	// ErrInspect is returned if Inspect is called and the final argument
 	// is not an error type (or nil).
-	ErrInspect = errors.New("improper use of Inspect function")
+	ErrInspect = errors.New("improper use of Detect function")
 )
 
 // Sherlock checks errors for you
 type Sherlock struct {
 	notebook string
-	action   func(error)
+	action   func(bool, error)
 }
 
 type failure struct {
-	err   error
-	stack []byte
+	detect bool
+	err    error
+	stack  []byte
 }
 
 // Notebook can be called to set a file location where Sherlock should leave
@@ -40,7 +41,7 @@ func (s *Sherlock) Notebook(path string) {
 
 // Action sets an action for Sherlock to perform after concluding an
 // investion if something went wrong.
-func (s *Sherlock) Action(fn func(err error)) {
+func (s *Sherlock) Action(fn func(detected bool, err error)) {
 	s.action = fn
 }
 
@@ -49,19 +50,20 @@ func (s *Sherlock) Action(fn func(err error)) {
 // as its argument.
 func Assert(statement bool, err error) {
 	if statement == false {
-		panic(&failure{err, debug.Stack()})
+		panic(&failure{false, err, debug.Stack()})
 	}
 }
 
-// Inspect should be used with a function that can return an error. The final
-// argument is assumed to be type error or nil. If it is an error, Inspect
-// throws a panic with the given error as its argument.
-func Inspect(vals ...interface{}) {
+// Detect should be used with a function that can return an error. The final
+// argument is assumed to be type error or nil. If it is an error, Detect
+// throws a panic with the given error as its argument. It also provides true
+// to the Action, which Assert does not do.
+func Detect(vals ...interface{}) {
 	x := vals[len(vals)-1]
 	if x != nil {
 		err, ok := x.(error)
 		Assert(ok, ErrInspect)
-		panic(&failure{err, debug.Stack()})
+		panic(&failure{true, err, debug.Stack()})
 	}
 }
 
@@ -71,10 +73,29 @@ func (s *Sherlock) Investigation() {
 	if r != nil {
 		fail, ok := r.(*failure)
 		if !ok {
+			fmt.Println(string(debug.Stack()))
 			panic(r)
 		}
 		s.writeCaseFiles(fail)
-		s.action(fail.err)
+		s.action(fail.detect, fail.err)
+	}
+}
+
+// Catch should be deferred and can be used within a closure to change the
+// return value of an error.
+func Catch(err *error) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	x, ok := r.(error)
+	if ok {
+		*err = x
+		return
+	}
+	y, ok := r.(failure)
+	if ok {
+		*err = y.err
 	}
 }
 
