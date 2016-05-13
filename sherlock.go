@@ -22,6 +22,14 @@ type Sherlock struct {
 	standard   error
 }
 
+func New() *Sherlock {
+	response := new(Sherlock)
+	response.registered = make(map[error]bool)
+	response.mappings = make(map[error]error)
+	response.substrings = make(map[string]error)
+	return response
+}
+
 // Standard allows you to define a default-case error for Sherlock to throw as a
 // result of an Assert or a Try when the received error is not a registered
 // error. The default behaviour is to just pass it straight through, but this
@@ -146,7 +154,7 @@ func (s *Sherlock) Catch(err *error) {
 		*err = s.error(x)
 		return
 	}
-	y, ok := r.(failure)
+	y, ok := r.(*failure)
 	if ok {
 		*err = s.error(y.err)
 	}
