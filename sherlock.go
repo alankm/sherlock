@@ -1,97 +1,123 @@
 /*
-Package sherlock a simple little package designed to help tidy up go code by reducing
-the substantial number of if err != nil checks usually performed.
+Package sherlock helps tidy up go code by reducing the substantial number of
+"if err != nil" checks usually performed.
 */
 package sherlock
 
 import (
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
+	"regexp"
+	"runtime"
 	"runtime/debug"
 	"strings"
 )
 
-// Sherlock checks errors for you
-type Sherlock struct {
-	notebook   string
-	action     func(bool, error)
-	registered map[error]bool
-	mappings   map[error]error
-	substrings map[string]error
-	standard   error
+var (
+	ErrUnexpected = errors.New("sherlock found an unexpected error")
+
+	errUnrecoverable = errors.New("an unrecoverable bug occurred")
+
+	packages map[string]*sherlock
+)
+
+type sherlock struct {
+	errors         map[error]bool
+	mappings       map[error]error
+	regexps        map[string]bool
+	regexpMappings map[string]error
 }
 
-func New() *Sherlock {
-	response := new(Sherlock)
-	response.registered = make(map[error]bool)
-	response.mappings = make(map[error]error)
-	response.substrings = make(map[string]error)
-	return response
+func newSherlock() *sherlock {
+	s := new(sherlock)
+	s.errors = make(map[error]bool)
+	s.mappings = make(map[error]error)
+	s.regexps = make(map[string]bool)
+	s.regexpMappings = make(map[string]error)
+	return s
 }
 
-// Standard allows you to define a default-case error for Sherlock to throw as a
-// result of an Assert or a Try when the received error is not a registered
-// error. The default behaviour is to just pass it straight through, but this
-// makes it possible to pass a generic error such as an errInternal to represent
-// an unexpected edge case that needs to be reported as a bug.
-func (s *Sherlock) Standard(err error) {
-	s.standard = err
+func Register(err error) {
+	s := handler()
+	s.errors[err] = true
 }
 
-// Register adds the given error to the set of errors that should not be
-// replaced by the default error.
-func (s *Sherlock) Register(err error) {
-	s.registered[err] = true
+func RegisterRegex(regex string) {
+	s := handler()
+	s.regexps[regex] = true
 }
 
-// Map one error to another for Sherlock to translate. When Sherlock receives a
-// registered error via Assert or Try, instead of panicking with the received
-// error it will use the mapped error.
-func (s *Sherlock) Map(input, output error) {
-	s.mappings[input] = output
+func RegisterMapping(x, y error) {
+	s := handler()
+	s.mappings[x] = y
 }
 
-// MapPrefix a mapping from one substring to an error for Sherlock to translate.
-// When Sherlock receives an error via Assert or Try and cannot find a
-// Registered error or mapping, it will then resort to comparing all registered
-// prefix strings against the Error() of the received error. If the received
-// error contains a registered string as a prefix substring then it will use the
-// error registered with this function.
-func (s *Sherlock) MapPrefix(input string, output error) {
-	s.substrings[input] = output
+func RegisterRegexMapping(x string, y error) {
+	s := handler()
+	s.regexpMappings[x] = y
 }
 
-type failure struct {
-	err   error
-	stack []byte
+func handler() *sherlock {
+	if packages == nil {
+		packages = make(map[string]*sherlock)
+	}
+	caller := caller()
+	s, ok := packages[caller]
+	if !ok {
+		s = newSherlock()
+		packages[caller] = s
+	}
+	return s
 }
 
-// Notebook can be called to set a file location where Sherlock should leave
-// his notes after an investigation. If an error occurs whilst trying to use
-// this file, Sherlock will revert to creating a temporary file for it.
-func (s *Sherlock) Notebook(path string) {
-	s.notebook = path
+func caller() string {
+	_, file, _, ok := runtime.Caller(2)
+	if !ok {
+		panic(errUnrecoverable)
+	}
+	i := strings.LastIndex(file, "/")
+	return file[:i]
 }
 
-// Action sets an action for Sherlock to perform after concluding an
-// investion if something went wrong.
-func (s *Sherlock) Action(fn func(detected bool, err error)) {
-	s.action = fn
+func lookup(s *sherlock, err error, stack []byte) error {
+	// search basic registry
+	_, ok := s.errors[err]
+	if ok {
+		return err
+	}
+	// search map registry
+	val, ok := s.mappings[err]
+	if ok {
+		return val
+	}
+	// search registered regular expressions
+	str := err.Error()
+	for key, _ := range s.regexps {
+		ok, _ := regexp.MatchString(key, str)
+		if ok {
+			return err
+		}
+	}
+	// search registered regular expression mappings
+	for key, val := range s.regexpMappings {
+		ok, _ := regexp.MatchString(key, str)
+		if ok {
+			return val
+		}
+	}
+	// print diagnostic info to stderr and return an unexpected error
+	fmt.Fprintf(os.Stderr, "Sherlock received unexpected error: %v\n", err.Error())
+	fmt.Fprintf(os.Stderr, string(stack))
+	return ErrUnexpected
 }
 
-// Assert is used to ensure that things are operating as expected. If the
-// statement proves to be false, then Assert throws a panic with the given err
-// as its argument.
 func Assert(statement bool, err error) {
 	if statement == false {
-		panic(&failure{err, debug.Stack()})
+		panic(err)
 	}
 }
 
-// Try should be used with a function that can return an error. The final
-// argument is assumed to be type error or nil. If it is an error, Try throws a
-// panic with the given error as its argument.
 func Try(vals ...interface{}) {
 	x := vals[len(vals)-1]
 	if x != nil {
@@ -99,84 +125,22 @@ func Try(vals ...interface{}) {
 		if !ok {
 			return
 		}
-		panic(&failure{err, debug.Stack()})
+		panic(lookup(handler(), err, debug.Stack()))
 	}
 }
 
-func (s *Sherlock) error(err error) error {
-	// check if the error is registered
-	_, ok := s.registered[err]
-	if ok {
-		return err
+func Check(err error) {
+	if err != nil {
+		panic(lookup(handler(), err, debug.Stack()))
 	}
-	// check if map contains err
-	val, ok := s.mappings[err]
-	if ok {
-		return val
-	}
-	// check if err matches any known substring prefixes
-	e := err.Error()
-	for key, val := range s.substrings {
-		if strings.HasPrefix(e, key) {
-			return val
-		}
-	}
-	// return default error if there is one
-	if s.standard != nil {
-		return s.standard
-	}
-	// return received error
-	return err
 }
 
-// Investigation should be deferred before any
-func (s *Sherlock) Investigation() {
+func Catch(err *error) {
 	r := recover()
 	if r != nil {
-		fail, ok := r.(*failure)
-		if !ok {
-			fmt.Println(string(debug.Stack()))
-			panic(r)
-		}
-		s.writeCaseFiles(fail)
-	}
-}
-
-// Catch should be deferred and can be used within a closure to change the
-// return value of an error.
-func (s *Sherlock) Catch(err *error) {
-	r := recover()
-	if r == nil {
-		return
-	}
-	x, ok := r.(error)
-	if ok {
-		*err = s.error(x)
-		return
-	}
-	y, ok := r.(*failure)
-	if ok {
-		*err = s.error(y.err)
-	}
-}
-
-func (s *Sherlock) writeCaseFiles(fail *failure) {
-	var err error
-	var notebook *os.File
-	if s.notebook != "" {
-		err = os.Remove(s.notebook)
-		if err == nil {
-			notebook, err = os.Create(s.notebook)
+		x, ok := r.(error)
+		if ok {
+			*err = x
 		}
 	}
-	if notebook == nil {
-		notebook, err = ioutil.TempFile("", "Sherlock-")
-		if err != nil {
-			panic(err)
-		}
-	}
-	defer notebook.Close()
-
-	fmt.Fprintf(notebook, "FAILURE: %v\n", fail.err.Error())
-	fmt.Fprintf(notebook, "STACK TRACE:\n%v\n", string(fail.stack))
 }
