@@ -1,121 +1,142 @@
 /*
-Package sherlock a simple little package designed to help tidy up go code by reducing
-the substantial number of if err != nil checks usually performed.
+Package sherlock helps tidy up go code by reducing the substantial number of
+"if err != nil" checks that are usually performed on code even in cases where
+errors are unexpected. Instead of propagating error return values all the way up
+the stack, sherlock can unwind the stack by using panic. An appropriately placed
+Catch can be used to manage thrown errors higher up in the stack.
+
+A typical use for sherlock will have exported package functions return errors as
+is convention, but they will also contain a CatchAll, allowing unexported
+functions to do away with this practice.
+
+	func MyFunction() error {
+		var err error
+		func() {
+			defer sherlock.CatchAll(&err)
+			// function logic
+		}()
+		return err
+	}
+
+Written by Alan Murtagh
 */
 package sherlock
 
 import (
-	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
+	"runtime"
 	"runtime/debug"
+	"strings"
 )
 
-const ()
-
-var (
-	// ErrInspect is returned if Inspect is called and the final argument
-	// is not an error type (or nil).
-	ErrInspect = errors.New("improper use of Detect function")
-)
-
-// Sherlock checks errors for you
-type Sherlock struct {
-	notebook string
-	action   func(bool, error)
+type report struct {
+	err   error
+	stack string
+	pkg   string
 }
 
-type failure struct {
-	detect bool
-	err    error
-	stack  []byte
-}
-
-// Notebook can be called to set a file location where Sherlock should leave
-// his notes after an investigation. If an error occurs whilst trying to use
-// this file, Sherlock will revert to creating a temporary file for it.
-func (s *Sherlock) Notebook(path string) {
-	s.notebook = path
-}
-
-// Action sets an action for Sherlock to perform after concluding an
-// investion if something went wrong.
-func (s *Sherlock) Action(fn func(detected bool, err error)) {
-	s.action = fn
-}
-
-// Assert is used to ensure that things are operating as expected. If the
-// statement proves to be false, then Assert throws a panic with the given err
-// as its argument.
-func Assert(statement bool, err error) {
-	if statement == false {
-		panic(&failure{false, err, debug.Stack()})
+// Assert is used as a quick way to enforce contracts and to return custom
+// errors when a situation is possible but not intended to be recoverable.
+// If the condition is false, the provided error is thrown.
+func Assert(condition bool, err error) {
+	if condition {
+		return
 	}
+	panic(&report{
+		err:   err,
+		stack: stacktrace(),
+		pkg:   caller(),
+	})
 }
 
-// Detect should be used with a function that can return an error. The final
-// argument is assumed to be type error or nil. If it is an error, Detect
-// throws a panic with the given error as its argument. It also provides true
-// to the Action, which Assert does not do.
-func Detect(vals ...interface{}) {
-	x := vals[len(vals)-1]
-	if x != nil {
-		err, ok := x.(error)
-		Assert(ok, ErrInspect)
-		panic(&failure{true, err, debug.Stack()})
-	}
-}
-
-// Investigation should be deferred before any
-func (s *Sherlock) Investigation() {
-	r := recover()
-	if r != nil {
-		fail, ok := r.(*failure)
-		if !ok {
-			fmt.Println(string(debug.Stack()))
-			panic(r)
-		}
-		s.writeCaseFiles(fail)
-		s.action(fail.detect, fail.err)
-	}
-}
-
-// Catch should be deferred and can be used within a closure to change the
-// return value of an error.
-func Catch(err *error) {
+// Catch halts a sherlock panic and checks if the thrown error is the same error
+// provided as an argument. If the errors match then the provided function is
+// executed and the panic is recovered. If the errors do not match then the
+// error is rethrown. Errors are equal only if they have the same address.
+func Catch(err error, fn func()) {
 	r := recover()
 	if r == nil {
 		return
 	}
-	x, ok := r.(error)
-	if ok {
-		*err = x
-		return
+	x, ok := r.(*report)
+	if !ok || x.pkg != caller() {
+		fmt.Fprintf(os.Stderr, "%v", string(debug.Stack()))
+		panic(r)
 	}
-	y, ok := r.(failure)
-	if ok {
-		*err = y.err
+	if err == x.err {
+		fn()
+	} else {
+		panic(r)
 	}
 }
 
-func (s *Sherlock) writeCaseFiles(fail *failure) {
-	var err error
-	var notebook *os.File
-	if s.notebook != "" {
-		err = os.Remove(s.notebook)
-		if err == nil {
-			notebook, err = os.Create(s.notebook)
-		}
+// CatchAll halts a sherlock panic and fills the provided error pointer with the
+// error that was thrown.
+//
+// Sherlock can only catch sherlock thrown panics, and will rethrow a
+// non-sherlock panic. This behaviour can result in final stack traces being
+// difficult to use, but it is assumed that any non-sherlock panic is a bug, and
+// so sherlock will dump a stacktrace into stderr.
+//
+// Sherlock can also only catch panics thrown within the same package. It is
+// good practice to not let panics unwind beyond the boundaries of a package,
+// and so this is considered a bug by sherlock.
+func CatchAll(err *error) {
+	r := recover()
+	if r == nil {
+		err = nil
+		return
 	}
-	if notebook == nil {
-		notebook, err = ioutil.TempFile("", "Sherlock-")
-		if err != nil {
-			panic(err)
-		}
+	x, ok := r.(*report)
+	if !ok || x.pkg != caller() {
+		fmt.Fprintf(os.Stderr, "%v", string(debug.Stack()))
+		panic(r)
 	}
-	defer notebook.Close()
+	*err = x.err
+}
 
-	fmt.Fprintf(notebook, "FAILURE: %v\n", fail.err.Error())
-	fmt.Fprintf(notebook, "STACK TRACE:\n%v\n", string(fail.stack))
+// Check takes an arbitrary number of arguments and checks only the final one.
+// If the final argument is of type error and is non nil, it is thrown as a
+// sherlock panic.
+func Check(args ...interface{}) {
+	l := len(args)
+	if args[l-1] == nil {
+		return
+	}
+	err, ok := args[l-1].(error)
+	if !ok {
+		return
+	}
+	panic(&report{
+		err:   err,
+		stack: stacktrace(),
+		pkg:   caller(),
+	})
+}
+
+// Throw simply throws the provided error as a sherlock panic.
+func Throw(err error) {
+	panic(&report{
+		err:   err,
+		stack: stacktrace(),
+		pkg:   caller(),
+	})
+}
+
+func stacktrace() string {
+	// TODO: remove parts of stacktrace that exist due to this package.
+	return string(debug.Stack())
+}
+
+// NOTE: caller determines the calling package by skipping up the stack and
+// determining which package the calling function's calling function came from.
+// Take care to ensure it is never used any further down the stack.
+func caller() string {
+	_, file, _, ok := runtime.Caller(1)
+	if !ok {
+		panic(nil)
+	}
+	i := strings.LastIndex(file, "/")
+	return file[:i]
 }
